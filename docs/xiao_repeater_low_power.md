@@ -6,7 +6,7 @@ The firmware has been built and passed software tests. The maintainer has also f
 
 ## Reported hardware measurements
 
-The maintainer reported these approximate measurements on their XIAO nRF52840 / Wio SX1262 setup:
+The maintainer reported these approximate measurements on their XIAO nRF52840 / Wio SX1262 setup. During testing, the repeater was powered by a battery connected to the XIAO nRF52840 battery terminals, rather than by USB:
 
 | Operating mode | Reported current |
 | --- | ---: |
