@@ -1,36 +1,47 @@
-# XIAO nRF52840 / Wio SX1262: Repeater mit Stromsparfunktionen
+# XIAO nRF52840 / Wio SX1262: Low-power repeater
 
-Ausgangsbasis ist der offizielle Tag [repeater-v1.17.1](https://github.com/meshcore-dev/MeshCore/tree/repeater-v1.17.1), Commit `d92964352441e53b93e8667b802e04f6e072b39e`. Das gepruefte PlatformIO-Ziel heisst `Xiao_nrf52_repeater`. Diese Anpassung meldet sich als `v1.17.1-lp1`.
+This implementation is based on the official [repeater-v1.17.1](https://github.com/meshcore-dev/MeshCore/tree/repeater-v1.17.1) tag, commit `d92964352441e53b93e8667b802e04f6e072b39e`. The tested PlatformIO environment is `Xiao_nrf52_repeater`. The firmware identifies itself as `v1.17.1-lp1`.
 
-Die Implementierung wurde gebaut und mit Softwaretests geprueft. Sie wurde hier **nicht auf einen Repeater geflasht**. Funkzuverlaessigkeit, Stromverbrauch und physisches Aufwachen sind noch auf der Zielhardware zu pruefen.
+The firmware has been built and passed software tests. The maintainer has also flashed it onto the target hardware and reported successful operation. See [reported hardware measurements](#reported-hardware-measurements) for current consumption and [hardware validation](#hardware-validation) for the broader test plan.
 
-## Ergebnisse der Untersuchung
+## Reported hardware measurements
 
-- Entry Point: `examples/simple_repeater/main.cpp`, Repeater und Admin-Kommandos: `MyMesh.cpp/.h`.
-- `variants/xiao_nrf52/target.cpp` erzeugt Radio, Wrapper und `AutoDiscoverRTCClock` mit `VolatileRTCClock` als Fallback.
-- `src/helpers/NRF52Board.cpp::sleep()` verwendet System-ON mit `sd_app_evt_wait()` bzw. WFE. Die bisherige Funktion und `powersaving on/off` bleiben erhalten.
-- Im verwendeten Arduino-Kern (`meshcore-dev/Adafruit_nRF52_Arduino`, `d541301`) kommt `millis()` aus dem FreeRTOS-Tick. Tickless Idle verwendet RTC1 und behaelt RAM. Dieser vorhandene Mechanismus traegt den Nachtmodus; es wird kein eigenes RTC-Register umkonfiguriert.
-- `VolatileRTCClock` akkumuliert `millis()` in `tick()`. Deshalb wird die Uhr auch waehrend der Nacht mindestens einmal pro Sekunde aktualisiert.
-- RadioLib ist auf Commit `6d8934836678d8894e3d556550475b37dce3e2b6` festgelegt. Dessen SX126x-API bietet `calculateRxDutyCycle()`, `startReceiveDutyCycleAuto()`, `sleep(true)` und `standby()` mit Wakeup.
-- Der vorhandene Wrapper pollt IRQ und RSSI und fragt fuer Airtime das Modem per SPI ab. Solche Zugriffe sind fuer RX Duty Cycle ungeeignet. Der neue Wrapper verwendet Aktivitaets-Interrupts, speichert Paket-RSSI/SNR vor dem RX-Neustart und berechnet Airtime ohne SPI.
-- `CommonCLI` speichert Einstellungen bereits ueber `ConfigSerializer` in `/prefs.json`. Dieses Format wird erweitert; Identity, ACL, Routing und bestehende Einstellungen werden nicht geloescht oder neu aufgebaut.
-- Remote-CLI-Kommandos kommen ueber den vorhandenen entschluesselten Admin-Pfad mit Replay-Pruefung. Erfolgreiches `clock sync` und `time <Unixzeit>` melden die akzeptierte Zeit an den Power Manager. Nachbar-Adverts setzen weder die RTC noch die Uhrvaliditaet.
+The maintainer reported these approximate measurements on their XIAO nRF52840 / Wio SX1262 setup:
 
-## Betrieb und Voreinstellungen
+| Operating mode | Reported current |
+| --- | ---: |
+| RX duty cycling | 2.6 mA |
+| Scheduled night sleep: SX1262 and nRF52840 sleeping | 0.5 mA (500 uA) |
 
-RX Duty Cycle und Night Sleep sind bei fehlenden Einstellungen **ausgeschaltet**. Das Nachtfenster ist vorbelegt mit 01:00 bis 05:00 **UTC**. Beide Optionen sind unabhaengig von der bestehenden CPU-Power-Saving-Einstellung.
+These are measurements from one setup, not guaranteed specifications for every board. Supply voltage, USB connection, sensors, regulator losses, modem settings, RF traffic, and measurement method can affect the result. The successful flashing and operation report does not establish that every recovery and reliability test below has been completed.
 
-Die normale CPU-Stromsparfunktion laesst den konfigurierten RX-Modus aktiv. Der Nachtmodus setzt den SX1262 in Warm Sleep, pausiert den Mesh-Dispatcher und blockiert den Loop-Task jeweils hoechstens eine Sekunde mit `vTaskDelay()`. Der RTC1-basierte Idle-Pfad kann damit schlafen. Lokale serielle Diagnose bleibt moeglich. Es gibt keinen mehrstuendigen `delay()`, keinen taeglichen Reboot und keinen SYSTEMOFF-Aufruf im neuen Nachtpfad.
+## Implementation findings
 
-`clock_valid` startet bei jedem echten Boot mit `false`, auch wenn eine externe RTC zufaellig eine plausible Jahreszahl liefern sollte. Erst eine akzeptierte Admin-Uhrsetzung mit plausibler Zeit und erfolgreicher Ruecklesung gibt den Nachtmodus frei. 2024/2025 werden abgewiesen; die Plausibilitaetsgrenzen sind 2026-01-01 bis vor 2100-01-01 UTC. Ein plausibles Datum alleine reicht nicht.
+- Entry point: `examples/simple_repeater/main.cpp`. Repeater behavior and admin commands: `MyMesh.cpp/.h`.
+- `variants/xiao_nrf52/target.cpp` creates the radio, wrapper, and `AutoDiscoverRTCClock`, with `VolatileRTCClock` as a fallback.
+- `src/helpers/NRF52Board.cpp::sleep()` uses System-ON sleep through `sd_app_evt_wait()` or WFE. The existing behavior and `powersaving on/off` commands are preserved.
+- In the Arduino core used here (`meshcore-dev/Adafruit_nRF52_Arduino`, `d541301`), `millis()` comes from the FreeRTOS tick. Tickless idle uses RTC1 and retains RAM. Night sleep uses this existing mechanism without reconfiguring RTC registers.
+- `VolatileRTCClock` accumulates `millis()` in `tick()`. The clock therefore continues to be updated at least once per second during night sleep.
+- RadioLib is pinned to commit `6d8934836678d8894e3d556550475b37dce3e2b6`. Its SX126x API provides `calculateRxDutyCycle()`, `startReceiveDutyCycleAuto()`, `sleep(true)`, and `standby()` with wakeup.
+- The original wrapper polls IRQ and RSSI and queries the modem over SPI to calculate airtime. Those accesses interfere with RX duty cycling. The new wrapper uses activity interrupts, caches packet RSSI/SNR before restarting RX, and calculates airtime without SPI access.
+- `CommonCLI` already stores settings through `ConfigSerializer` in `/prefs.json`. This format is extended without deleting or rebuilding the identity, ACL, routing, or existing settings.
+- Remote CLI commands use the existing decrypted admin path with replay checks. Successful `clock sync` and `time <Unix timestamp>` commands report the accepted time to the power manager. Neighbor adverts set neither the RTC nor clock validity.
 
-Die laufende Uhr wird mit verstrichener `millis()`-Zeit verglichen. Ein Ruecksprung, groesserer unerwarteter Sprung oder Stillstand entzieht die Validitaet. Nach normalem Nachtschlaf bleibt sie erhalten. Es wird keine Uhrzeit und keine Validitaet in Flash gespeichert.
+## Operation and defaults
 
-## RX Duty Cycle und Praeambel
+RX duty cycling and night sleep are **disabled** when no settings are present. The default night window is 01:00 to 05:00 **UTC**. Both options are independent of the existing CPU power-saving setting.
 
-RadioLib muss wissen, wie kurz die **Senderpraeambel** sein kann. Diese MeshCore-Version sendet bei SF <= 8 mit 32 Symbolen, darueber mit 16. Fuer unbekannte oder aeltere Sender darf daraus keine universelle 32-Symbol-Annahme abgeleitet werden.
+Normal CPU power saving keeps the configured RX mode active. Night sleep puts the SX1262 into warm sleep, pauses the mesh dispatcher, and blocks the loop task for at most one second at a time using `vTaskDelay()`. This lets the RTC1-based idle path sleep. Local serial diagnostics remain available. The new night path uses no multi-hour `delay()`, daily reboot, or SYSTEMOFF call.
 
-`rx.preamble` ist deshalb konservativ mit 16 vorbelegt. Bei dieser Laenge bleibt Continuous RX aktiv. Erst wenn alle relevanten Sender bei der verwendeten SF tatsaechlich mindestens 32 Praeambelsymbole senden, kann man fuer SF8/BW62.5 konfigurieren:
+`clock_valid` starts as `false` after every actual boot, even if an external RTC happens to contain a plausible year. Night sleep is allowed only after an accepted admin clock update with a plausible time and successful readback. Dates in 2024/2025 are rejected; the accepted range starts at 2026-01-01 and ends before 2100-01-01 UTC. A plausible date alone is insufficient.
+
+The running clock is compared with elapsed `millis()` time. A backward jump, larger unexpected jump, or stalled clock invalidates it. Validity is retained after normal night sleep. Neither the time nor clock validity is stored in flash.
+
+## RX duty cycling and preamble
+
+RadioLib needs to know the shortest possible **transmitter preamble**. This MeshCore version transmits with 32 symbols at SF <= 8 and 16 symbols at higher spreading factors. Unknown or older transmitters must not be assumed to use 32 symbols universally.
+
+`rx.preamble` therefore defaults conservatively to 16. At this length, continuous RX remains active. Only if all relevant transmitters actually send at least 32 preamble symbols at the selected SF should you configure the following for SF8/BW62.5:
 
 ```text
 powersaving on
@@ -39,67 +50,115 @@ set rx.duty on
 get rx.duty
 ```
 
-`active=yes` zeigt den aktiven Duty-Cycle-Modus. Eine Einstellung von 32 trotz kuerzerer Senderpraeambeln kann Pakete verlieren. Bei gemischten oder unbekannten Sendern bei 16 bleiben bzw. Duty Cycle ausgeschaltet lassen.
+`active=yes` indicates that duty cycling is active. Setting 32 when transmitters use shorter preambles can lose packets. For mixed or unknown transmitters, keep the value at 16 or leave duty cycling disabled.
 
-Die Periodenberechnung erfolgt mit der echten RadioLib-Funktion und den aktuellen Modemwerten. Zu kurze Schlafperioden, falscher Modemtyp, unpassende Praeambel oder Startfehler fuehren zu Continuous RX. Ein fehlgeschlagener Duty-Cycle-Start wird nicht nach jedem Paket wieder versucht. `off`/`on`, eine geaenderte Praeambel oder neue Funkparameter erlauben einen neuen Versuch.
+The periods are calculated using the actual RadioLib function and current modem settings. Sleep periods that are too short, the wrong modem type, an unsuitable preamble, or startup errors cause a fallback to continuous RX. A failed duty-cycle start is not retried after every packet. Switching `off`/`on`, changing the preamble, or applying new radio parameters allows another attempt.
 
-CAD oder eine aktive RSSI-Interferenzschwelle erzwingen ebenfalls Continuous RX. Diese Funktionen brauchen Radioaktivitaet, die sich mit ungestoertem Duty-Cycle-Schlaf nicht sauber kombinieren laesst. Die vorhandene Kanalpruefung bleibt damit erhalten.
+CAD or an active RSSI interference threshold also forces continuous RX. These features require radio activity that cannot be cleanly combined with uninterrupted duty-cycle sleep. Existing channel checks are therefore preserved.
 
-Ein Praeambel-Interrupt markiert nur RX-Aktivitaet. Er liest kein Paket und startet RX nicht neu. Erst RX_DONE fuehrt zur vorhandenen Paketverarbeitung. Headerfehler/Timeouts starten den Empfang erneut. Nach TX, AGC-Reset und Radio-Recovery wird der gewuenschte, unterstuetzte RX-Modus wieder gestartet. Ein zeitlich begrenzter Aktivitaets-Watchdog verhindert Festhaengen nach unvollstaendigen Praeambeln.
+A preamble interrupt only marks RX activity; it neither reads a packet nor restarts RX. Only RX_DONE invokes the existing packet processing. Header errors and timeouts restart reception. After TX, AGC reset, or radio recovery, the requested RX mode is restarted if supported. A bounded activity watchdog prevents the radio from remaining stuck after an incomplete preamble.
 
 ## CLI
 
-Alle Uhrzeiten und Zeitfenster sind UTC. Es gibt keine automatische Sommer-/Winterzeitumrechnung.
+All times and windows use **UTC in 24-hour `HH:MM` format**. Do not add AM or PM: `20:35` means 8:35 PM UTC. There is no automatic time-zone or daylight-saving conversion. Convert your local time to UTC before setting a window.
 
-| Kommando | Wirkung |
+| Command | Effect |
 | --- | --- |
-| `powersaving on`, `powersaving off`, `powersaving` | Bestehende CPU-Funktion |
-| `get powersave` | Alias fuer den CPU-Status |
-| `get rx.duty` | Wunsch, aktiver Modus, Senderpraeambel, CAD/RSSI-Policy, letzter Duty-Fehler |
-| `set rx.duty on/off` | Duty-Cycle-Wunsch speichern |
-| `get rx.preamble` | Mindestpraeambel der Sender anzeigen |
-| `set rx.preamble 16` bzw. `32` | Mindestpraeambel einstellen; akzeptierter Bereich 1..32 |
-| `get night.sleep` | Einstellung, UTC-Fenster und Grund anzeigen |
-| `set night.sleep on/off` | Nachtmodus konfigurieren |
-| `set night.start 01:00` | Beginn einstellen |
-| `set night.end 05:00` | Ende einstellen |
-| `get night.start`, `get night.end` | Grenzen anzeigen |
-| `get clock.valid` | Laufzeit-Uhrvaliditaet anzeigen |
-| `clock` | Bestehende RTC-Zeitabfrage |
-| `clock sync` | Bestehende Remote-Admin-Synchronisation ueber den Sender-Timestamp |
-| `time <Unixsekunden>` | Bestehende explizite Uhrsetzung, auch lokal per USB |
-| `get power.status` | Validitaet, Unixzeit, Radio-Modus, geplanter Wake und Radiofehler |
-| `get power.reason` | Sleep-Verweigerung und letzter Wake-Grund |
+| `powersaving on`, `powersaving off`, `powersaving` | Existing CPU power-saving controls |
+| `get powersave` | Alias for CPU power-saving status |
+| `get rx.duty` | Requested and active modes, transmitter preamble, CAD/RSSI policy, and last duty-cycle error |
+| `set rx.duty on/off` | Save the requested duty-cycle setting; send either `on` or `off` |
+| `get rx.preamble` | Show the minimum transmitter preamble |
+| `set rx.preamble 16` or `set rx.preamble 32` | Set the minimum preamble; accepted range: 1..32 |
+| `get night.sleep` | Show the setting, UTC window, and reason |
+| `set night.sleep on/off` | Configure night sleep; send either `on` or `off` |
+| `set night.start 01:00` | Set the start time |
+| `set night.end 05:00` | Set the end time |
+| `get night.start`, `get night.end` | Show window boundaries |
+| `get clock.valid` | Show runtime clock validity |
+| `clock` | Existing RTC time query |
+| `clock sync` | Existing remote admin synchronization using the sender timestamp |
+| `time <Unix timestamp>` | Existing explicit clock update, also available locally over USB |
+| `get power.status` | Clock validity, Unix time, radio mode, scheduled wakeup, and radio errors |
+| `get power.reason` | Reason for refusing sleep and the last wakeup reason |
 
-Die serielle CLI hat keinen Sender-Timestamp: Dort kann `clock sync` keine Zeit vom PC beziehen. Fuer eine lokale Uhrsetzung den aktuellen UTC-Unix-Timestamp verwenden, z.B. mit PowerShell `[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()`, und dann `time <Wert>` senden. Die bestehende Vorwaerts-only-Regel bleibt erhalten. Abgelehnte Synchronisationen geben den Nachtmodus nicht frei.
+The serial CLI has no sender timestamp, so `clock sync` cannot obtain the PC's time over USB. For a local clock update, obtain the current UTC Unix timestamp, for example using PowerShell `[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()`, and send `time <value>`. The existing rule allowing only forward time updates is preserved. Rejected synchronization attempts do not enable night sleep.
 
-Gleiche Start-/Endzeit ist ein ungueltiges bzw. leeres Fenster, kein 24-Stunden-Schlaf. Beim Einschalten wird es abgewiesen. Fenster wie 21:00 bis 05:00 funktionieren ueber Mitternacht.
+To test a two-minute window from **20:35 to 20:37 UTC**, send these commands individually before the window starts:
 
-Nur geaenderte neue Konfigurationswerte werden gespeichert. Statusabfragen, Tageswechsel, Sleep/Wake und Clock Sync schreiben keine neuen Power-/Clock-Daten in Flash. Fehler beim Speichern werden gemeldet. Das bereits vorhandene Speicherverfahren ist weiterhin nicht transaktional; ein Stromausfall mitten im Schreiben einer Einstellungsdatei ist kein durch diese Anpassung geloestes Problem.
+```text
+set night.sleep off
+set night.start 20:35
+set night.end 20:37
+```
 
-## Eintritt, Wake und Failsafes
+Set or synchronize the clock using one of the methods above, then send:
 
-Der Nachtmodus wird erst nach einem normalen Loop-Durchlauf betrachtet. Alle belegten Plaetze des vorhandenen Paketpools verhindern den Eintritt, also auch verzogerter RX, laufende TX und gehaltene Pakete. Dazu kommen bekannte Radio-Interrupts/Praeambeln, serielle Eingaben, Region-Import, ausstehende ACL-Schreibvorgaenge, Neighbor-Discovery und temporaere Radioaenderungen. Arbeit wird zuerst abgearbeitet; sie kann das Nachtfenster ganz verhindern.
+```text
+get clock.valid
+set night.sleep on
+get night.sleep
+```
 
-Ein wiederholender FreeRTOS-Timer wird vor dem ersten Nachtschlaf gestartet. Eintritt ist erst erlaubt, wenn er einen Callback geliefert hat und noch aktiv/frisch ist. Sein Ausfall verhindert Sleep oder weckt beim naechsten Loop-Durchlauf. Eine zweite Wake-Grenze verwendet monotone `millis()`-Zeit und funktioniert auch ueber deren 32-Bit-Ueberlauf. Muss diese Grenze wegen einer zurueckliegenden RTC-Zeit greifen, wird die Uhr ungueltig, um erneutes Einschlafen zu verhindern.
+`get clock.valid` must return `true` for sleep to be allowed. The window repeats daily while enabled. Disable it after testing with `set night.sleep off`. During night sleep the repeater is unavailable over LoRa, while the local serial CLI remains accessible.
 
-Wake erfolgt ueber `standby()` mit NSS-Wakeup und anschliessenden RX-Start. Bei Fehler folgt eine Radio-Reinitialisierung mit dem vorhandenen `std_init()` sowie Wiederherstellung von Frequenz, BW, SF, CR, Praeambel, TX-Leistung, CRC und RX-Gain. Dabei bleiben Mesh-Identitaet und CPU-Laufzeit erhalten. Fortbestehende RX-Fehler werden im laufenden Programm mit begrenzter Retry-Frequenz behandelt und im Status gemeldet. Nach einem Radiofehler wird Continuous RX bevorzugt.
+Equal start and end times form an invalid or empty window, not a 24-hour sleep period. Enabling such a window is rejected. Windows such as 21:00 to 05:00 work across midnight.
 
-Timer- und Night-Sleep-Fehler sperren weiteren Nachtschlaf bis zur erneuten bewussten Konfiguration, z.B. `set night.sleep on`. Eine ungueltige Uhr benoetigt weiterhin eine akzeptierte Uhrsetzung. Die Nacht-Einstellung kann nach Reboot gespeichert `on` bleiben; effektiv ist Sleep mit `clock_valid=false` gesperrt.
+Only changed values of the new settings are saved. Status queries, date changes, sleep/wakeup, and clock synchronization write no new power or clock data to flash. Save errors are reported. The existing storage procedure is still non-transactional; these changes do not address a power failure while a settings file is being written.
 
-Diagnose erfolgt auf Anfrage. Optionale `MESH_DEBUG`-Ausgaben entstehen bei Uebergaengen/Fehlern, nicht sekundenweise im normalen Betrieb.
+## Sleep entry, wakeup, and fail-safes
 
-## Grenzen gegenueber den Anforderungen
+Night sleep is considered only after a normal loop iteration. Every occupied slot in the existing packet pool prevents entry, including delayed RX, ongoing TX, and retained packets. Known radio interrupts or preambles, serial input, region import, pending ACL writes, neighbor discovery, and temporary radio changes also prevent entry. Pending work is processed first and can prevent sleep for the entire window.
 
-- Der SX1262 hat keinen atomaren Befehl fuer bedingtes Einschlafen bei gleichzeitigem Funkbeginn. Bekannte RX/TX-Aktivitaet wird abgewartet und direkt vor Sleep erneut geprueft. Ein neu beginnendes Paket unmittelbar zwischen letzter Pruefung und Sleep-Befehl kann an der Grenze des bewusst offline geschalteten Fensters verloren gehen. Eine absolute Nullverlust-Garantie an dieser Grenze ist mit dieser API nicht moeglich.
-- Eine Praeambelgarantie fuer beliebige fremde Sender kann die Firmware nicht ableiten. Die Mindestlaenge muss zur gesamten relevanten Sendergruppe passen.
-- RadioLib-/Timer-Fehler mit noch laufender CPU werden abgefangen. Ein ausgefallener RTC1/Kern-Scheduler, ein CPU-Lockup oder dauerhaft defekte Funkhardware lassen sich ohne einen unabhaengigen Hardware-Wake/Watchdog nicht absolut absichern. Hier wurde kein neuer Reboot-Watchdog eingefuehrt.
-- Die bestehende Unterspannungs-Bootsperre des XIAO nutzt weiterhin SYSTEMOFF. Das ist ein unveraenderter Schutzpfad des Boards und nicht der neue normale Nacht-/CPU-Schlaf.
-- USB, Sensoren, Board-Regler, RX-Gain, RF-Switch und TCXO beeinflussen den realen Strombedarf. 4..6 mA bzw. ein bestimmter Nachtstrom werden nicht als erreicht behauptet.
+A repeating FreeRTOS timer starts before the first night sleep. Entry is allowed only after it has delivered a callback and remains active with a recent callback. Timer failure prevents sleep or wakes the node at the next loop iteration. A second wakeup deadline uses monotonic `millis()` time and handles its 32-bit rollover. If this deadline must wake the node because the RTC has fallen behind, the clock is invalidated to prevent it from immediately sleeping again.
 
-## Build und Teststand
+Wakeup uses `standby()` with NSS wakeup, followed by an RX start. On failure, the radio is reinitialized using the existing `std_init()`, restoring frequency, BW, SF, CR, preamble, TX power, CRC, and RX gain. Mesh identity and CPU uptime are preserved. Persistent RX errors are handled while the program continues running, with a limited retry rate and status reporting. Continuous RX is preferred after a radio error.
 
-PlatformIO/Python und Pakete wurden lokal unter `../.tools` installiert. Aus diesem Repository:
+Timer and night-sleep errors prevent further night sleep until an explicit configuration command, such as `set night.sleep on`, resets the error latch. An invalid clock still requires an accepted clock update. The saved night-sleep setting may remain `on` after reboot, but sleep is effectively blocked while `clock_valid=false`.
+
+Diagnostics are provided on request. Optional `MESH_DEBUG` output occurs on transitions and errors, not every second during normal operation.
+
+## Limitations
+
+- The SX1262 has no atomic command for conditional sleep when radio activity starts simultaneously. Known RX/TX activity is allowed to finish and checked again immediately before sleep. A packet starting between the final check and the sleep command can be lost at the boundary of the deliberately offline window. This API cannot guarantee zero packet loss at that boundary.
+- The firmware cannot guarantee the preamble length of arbitrary third-party transmitters. The configured minimum must match the entire relevant group of transmitters.
+- RadioLib and timer errors are handled while the CPU is still running. An RTC1 or core scheduler failure, CPU lockup, or permanently faulty radio hardware cannot be fully covered without an independent hardware wakeup or watchdog. No new reboot watchdog has been added.
+- The XIAO's existing undervoltage boot protection still uses SYSTEMOFF. This board protection path is unchanged and is separate from normal night or CPU sleep.
+- USB, sensors, board regulators, RX gain, the RF switch, and the TCXO affect actual current consumption. The measurements above apply to the maintainer's setup and are not universal current targets.
+
+## Build and software tests
+
+With PlatformIO installed, run these commands from the repository root:
+
+```text
+pio run -e Xiao_nrf52_repeater
+pio run -e Xiao_nrf52_repeater -t create_uf2
+```
+
+The UF2 converter handles paths containing spaces and returns its errors to SCons.
+
+The original baseline, RX-duty intermediate version, and final firmware all built successfully:
+
+| Version | Flash | RAM |
+| --- | ---: | ---: |
+| Unmodified baseline | 387,720 bytes | 31,160 bytes |
+| RX-duty intermediate version | 390,568 bytes | 31,192 bytes |
+| Final: `v1.17.1-lp1` | 397,864 bytes | 31,296 bytes |
+
+The baseline and intermediate builds were saved locally under `../artifacts/baseline` and `../artifacts/rx-duty`. The intermediate version assumes a group of transmitters using 32-symbol preambles and lacks the final night-sleep and preamble fail-safes. Use the final firmware for further testing; duty cycling and night sleep can be enabled separately through the CLI. These local artifacts and the tools below are outside the firmware repository and are not required for a normal PlatformIO build.
+
+The 17 C++ tests compile the actual power policy and new radio wrapper for Cortex-M4 and run under Unicorn. The radio API is mocked for targeted error and state checks. Coverage includes window boundaries, 7,200 minute/window combinations, boot and default clock state, trusted clock updates and readback, clock jumps and stalls, timer failures, a five-minute cycle, repeated nights, `millis()` rollover, duty-cycle fallback, preamble handling, idle operation without SPI, TX and pending-work guards, warm sleep, and recovery.
+
+To run the tests, install their Python dependencies and provide an ARM G++ compiler:
+
+```text
+python -m pip install -r tests/requirements-power.txt
+python tests/run_power_tests.py --compiler /path/to/arm-none-eabi-g++
+```
+
+On Windows, use the compiler's `.exe` path. The runner also accepts the `ARM_CXX` environment variable. Without either override, it uses the compiler in the original local `../.tools/platformio` installation.
+
+For the original local Windows build setup, PlatformIO, Python, and packages were installed under `../.tools`. The following commands remain available from this repository when that directory exists:
 
 ```powershell
 $env:PLATFORMIO_CORE_DIR = Join-Path (Split-Path (Get-Location)) '.tools\platformio'
@@ -108,32 +167,28 @@ $env:PLATFORMIO_CORE_DIR = Join-Path (Split-Path (Get-Location)) '.tools\platfor
 & '..\.tools\pio-venv\Scripts\python.exe' tests\run_power_tests.py
 ```
 
-Der UF2-Konverter wurde fuer Pfade mit Leerzeichen korrigiert. Seine Fehler werden nun an SCons zurueckgegeben.
+## Hardware validation
 
-Baseline und RX-Duty-Zwischenstand wurden separat erfolgreich gebaut und unter `../artifacts/baseline` bzw. `../artifacts/rx-duty` gesichert. Der Zwischenstand ist fuer die 32-Symbol-Sendergruppe gedacht und enthaelt noch nicht die abschliessenden Nacht-/Praeambel-Failsafes. Fuer die weitere Erprobung den finalen Stand verwenden; Duty und Nachtmodus lassen sich einzeln per CLI aktivieren.
+Flashing, operation, and the current measurements above have been reported by the maintainer. The following is the broader hardware validation plan; completion of every item has not been reported:
 
-17 C++-Tests kompilieren die echte Power-Policy und den neuen Radio-Wrapper fuer Cortex-M4 und laufen unter Unicorn. Die Radio-API wird dabei fuer gezielte Fehler- und Zustandspruefungen gemockt. Abgedeckt sind Fenstergrenzen, 7.200 Minuten-/Fensterkombinationen, Reboot/Default-Uhr, vertraute Uhrsetzung/Ruecklesung, Uhrspruenge/Stillstand, Timerfehler, ein 5-Minuten-Zyklus, wiederholte Naechte, `millis()`-Ueberlauf, Duty-Fallback, Praeambelbehandlung, SPI-freies Idle, TX-/Pending-Sperren, Warm Sleep und Recovery. Tests benoetigen `pyelftools` und `unicorn==2.1.4`; alternativ kann `--compiler` einen anderen ARM-G++ angeben.
+1. Test the final version with both new options disabled: RX/TX, admin commands, flood and direct traffic, and the existing `powersaving` behavior.
+2. Enable RX duty cycling only with a known transmitter preamble. Compare packet loss against the baseline, verify RX after TX, AGC reset, and parameter changes, and measure current. Also check continuous-RX fallback for different SF/BW/preamble settings, CAD, and interference thresholds.
+3. Set the clock through the admin path and check `get clock.valid`. Configure a five-minute UTC window starting about two minutes in the future. Verify sleep, current, automatic wakeup, unchanged uptime and identity, and admin/flood/direct operation after wakeup. Repeat several times.
+4. Perform an actual reboot with night sleep saved as enabled. `get clock.valid` must return `false`, and the repeater must remain online during the window. After an accepted clock sync, it must return `true`, allowing sleep again. Default dates in 2024/2025 must never enable sleep.
+5. Test local `set night.sleep off` during sleep and pending TX/delayed RX at the window boundary. Validate these cases before relying on a multi-hour window.
 
-Auf der Hardware noch durchzufuehren:
+## Changed files
 
-1. Finalen Stand mit beiden Optionen aus pruefen: RX/TX, Admin, Flood, Direct und vorhandenes `powersaving`.
-2. Bei bekannter Senderpraeambel erst RX Duty aktivieren. Paketverluste gegen den Baseline-Stand vergleichen, RX nach TX/AGC/Parameterwechsel pruefen und Strom messen. Mit SF/BW/Praeambel, CAD und Interferenzschwelle auch Continuous-Fallback pruefen.
-3. Uhr per Admin setzen, `get clock.valid` pruefen. Ein UTC-Fenster etwa zwei Minuten in der Zukunft mit fuenf Minuten Dauer einstellen. Sleep, Strom, selbststaendigen Wake, unveraenderte Uptime/Identitaet und Admin/Flood/Direct nach Wake pruefen. Mehrfach wiederholen.
-4. Echter Reboot mit gespeichertem Nachtmodus: `get clock.valid` muss `false` sein; der Repeater muss waehrend des Fensters online bleiben. Danach akzeptierter Clock Sync: `true`, Sleep wieder moeglich. Default-Zeit 2024/2025 darf nie freigeben.
-5. Lokales `set night.sleep off` waehrend Sleep sowie ausstehende TX/Delayed-RX am Fensterbeginn pruefen. Erst nach diesen Versuchen ein echtes mehrstuendiges Fenster einstellen.
-
-## Geaenderte Stellen
-
-| Datei | Aenderung |
+| File | Change |
 | --- | --- |
-| `variants/xiao_nrf52/platformio.ini`, `target.h` | Neues Radio/Wrapper nur fuer dieses Repeater-Ziel, erkennbare Firmware-Version |
-| `src/helpers/radiolib/RepeaterSX1262Wrapper.h` (neu) | Duty-/IRQ-/Warm-Sleep-/Recovery-Kapselung, aufgeschobene Funkparameteraenderungen |
-| `src/helpers/radiolib/RadioLibWrappers.h/.cpp` | Kleine Hooks fuer Praeambel-vs-Paket-Interrupt, Metadaten und Zustands-/RX-Fehlerabfrage |
-| `examples/simple_repeater/RepeaterPowerManager.h` (neu) | Uhrtrust, UTC-Fenster und zwei Wake-Grenzen |
-| `examples/simple_repeater/MyMesh.h/.cpp` | Admin-CLI, Persistenzanbindung, Night-Pending-Pruefung und Power-Uebergaenge |
-| `examples/simple_repeater/main.cpp` | RTC1/FreeRTOS-Timer, Nacht-Loop und lokale Erreichbarkeit |
-| `src/helpers/CommonCLI.h/.cpp` | Power-Prefs und Hook nach akzeptierter Uhrsetzung; alte Prefs bleiben kompatibel |
-| `create-uf2.py` | Korrekte Pfadquotierung und Fehlerrueckgabe |
-| `tests/` | Ausfuehrbare C++-Policy-/API-Tests und Runner |
+| `variants/xiao_nrf52/platformio.ini`, `target.h` | New radio and wrapper only for this repeater environment; identifiable firmware version |
+| `src/helpers/radiolib/RepeaterSX1262Wrapper.h` (new) | Duty cycling, IRQ handling, warm sleep, recovery, and deferred radio parameter changes |
+| `src/helpers/radiolib/RadioLibWrappers.h/.cpp` | Small hooks for preamble versus packet interrupts, metadata, and state/RX error queries |
+| `examples/simple_repeater/RepeaterPowerManager.h` (new) | Clock trust, UTC windows, and two wakeup deadlines |
+| `examples/simple_repeater/MyMesh.h/.cpp` | Admin CLI, persistence, pending-work checks before night sleep, and power transitions |
+| `examples/simple_repeater/main.cpp` | RTC1/FreeRTOS timer, night loop, and local serial access |
+| `src/helpers/CommonCLI.h/.cpp` | Power preferences and hook after accepted clock updates; compatible with existing preferences |
+| `create-uf2.py` | Correct path quoting and error propagation |
+| `tests/` | Executable C++ policy/API tests and runner |
 
-`CustomSX1262.h`, `CustomSX1262Wrapper.h`, `NRF52Board.cpp`, Routing, Keys und Neighbor-Zeitverhalten bleiben im offiziellen Quellstand. Die neuen Wrapper verwenden diese vorhandenen Implementierungen.
+`CustomSX1262.h`, `CustomSX1262Wrapper.h`, `NRF52Board.cpp`, routing, keys, and neighbor time behavior remain as in the official source version. The new wrappers reuse these existing implementations.

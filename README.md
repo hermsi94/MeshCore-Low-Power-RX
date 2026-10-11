@@ -1,3 +1,11 @@
+## XIAO low-power repeater fork
+
+This fork adds RX duty cycling and scheduled UTC night sleep to the official MeshCore `repeater-v1.17.1` firmware for the XIAO nRF52840 / Wio SX1262. Build the `Xiao_nrf52_repeater` environment to use these features. Both options are disabled by default.
+
+The maintainer has flashed the firmware and reported successful operation, with approximately **2.6 mA during RX duty cycling** and **0.5 mA (500 uA) during night sleep** on their setup. Current consumption depends on the hardware and operating conditions.
+
+See the [low-power repeater guide](./docs/xiao_repeater_low_power.md) for configuration commands, transmitter preamble requirements, clock synchronization, build instructions, limitations, and validation status. This is a personal experimental fork with changes developed with LLM assistance.
+
 ## About MeshCore
 
 MeshCore is a lightweight, portable C++ library that enables multi-hop packet routing for embedded projects using LoRa and other packet radios. It is designed for developers who want to create resilient, decentralized communication networks that work without the internet.
