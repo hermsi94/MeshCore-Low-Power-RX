@@ -21,12 +21,18 @@ protected:
   uint16_t _num_floor_samples;
   int32_t _floor_sample_sum;
   uint8_t _preamble_sf;
+  int16_t _last_rx_error = 0;
 
   void idle();
   void startRecv();
   float packetScoreInt(float snr, int sf, int packet_len);
   virtual bool isReceivingPacket() =0;
   virtual void doResetAGC();
+  virtual bool isReceivePacketReady() { return true; }
+  virtual void onReceiveComplete() { }
+  bool hasRadioInterrupt() const;
+  bool isTransmitting() const;
+  void markRadioIdle();
 
 public:
   RadioLibWrapper(PhysicalLayer& radio, mesh::MainBoard& board) : _radio(&radio), _board(&board), _preamble_sf(0) { n_recv = n_sent = 0; }

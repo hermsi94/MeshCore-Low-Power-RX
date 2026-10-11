@@ -860,7 +860,7 @@ void MyMesh::sendNodeDiscoverReq() {
 
 MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondClock &ms, mesh::RNG &rng,
                mesh::RTCClock &rtc, mesh::MeshTables &tables)
-    : mesh::Mesh(radio, ms, rng, rtc, *new StaticPoolPacketManager(32), tables),
+    : mesh::Mesh(radio, ms, rng, rtc, *new StaticPoolPacketManager(PACKET_POOL_SIZE), tables),
       region_map(key_store), temp_map(key_store),
       _cli(board, rtc, sensors, region_map, acl, &_prefs, this),
       telemetry(MAX_PACKET_PAYLOAD - 4),
@@ -979,6 +979,10 @@ void MyMesh::begin(FILESYSTEM *fs) {
   radio_driver.setTxPower(_prefs.tx_power_dbm);
 
   radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
+#ifdef REPEATER_LOW_POWER
+  radio_driver.setMinimumSenderPreamble(_prefs.rx_min_preamble);
+  radio_driver.setDutyCycleEnabled(_prefs.rx_duty_enabled == 1);
+#endif
   MESH_DEBUG_PRINTLN("RX Boosted Gain Mode: %s",
                      radio_driver.getRxBoostedGainMode() ? "Enabled" : "Disabled");
   board.setLoRaFemLnaEnabled(_prefs.radio_fem_rxgain);
@@ -1237,6 +1241,36 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   }
 
   // handle ACL related commands
+#ifdef REPEATER_LOW_POWER
+  if (handlePowerCommand(command, reply)) return;
+  if (strcmp(command, "get rx.duty") == 0) {
+    sprintf(reply, "%s, active=%s, preamble=%u, policy=%s, error=%d", _prefs.rx_duty_enabled == 1 ? "on" : "off",
+      radio_driver.isDutyCycleActive() ? "yes" : "no",
+      _prefs.rx_min_preamble,
+      radio_driver.dutyCyclePolicyAllowed() ? "allowed" : "CAD/RSSI requires continuous",
+      radio_driver.getDutyCycleError());
+    return;
+  }
+  if (_power.sleeping() && strcmp(command, "clock") != 0) {
+    _power.cancelSleep("local CLI");
+    if (!radio_driver.wakeNightSleep()) _power.denySleep("radio wake error");
+  }
+  if (strcmp(command, "set rx.duty on") == 0 || strcmp(command, "set rx.duty off") == 0) {
+    uint8_t enabled = strcmp(command, "set rx.duty on") == 0;
+    if (_prefs.rx_duty_enabled != enabled) {
+      uint8_t old = _prefs.rx_duty_enabled;
+      _prefs.rx_duty_enabled = enabled;
+      if (!_cli.savePrefs(_fs)) {
+        _prefs.rx_duty_enabled = old;
+        strcpy(reply, "ERR: saving prefs failed");
+        return;
+      }
+    }
+    radio_driver.setDutyCycleEnabled(enabled);
+    strcpy(reply, "OK");
+    return;
+  }
+#endif
   if (memcmp(command, "setperm ", 8) == 0) {   // format:  setperm {pubkey-hex} {permissions-int8}
     char* hex = &command[8];
     char* sp = strchr(hex, ' ');   // look for separator char
@@ -1336,3 +1370,131 @@ bool MyMesh::hasPendingWork() const {
 #endif
   return _mgr->getOutboundTotal() > 0;
 }
+
+#ifdef REPEATER_LOW_POWER
+bool MyMesh::hasPendingNightWork() const {
+  // All allocated packets count, including delayed RX and the packet in TX.
+  return hasPendingWork() || _mgr->getFreeCount() != PACKET_POOL_SIZE || region_load_active ||
+    dirty_contacts_expiry || set_radio_at || revert_radio_at ||
+    (pending_discover_tag && !millisHasNowPassed(pending_discover_until));
+}
+
+void MyMesh::onTrustedClockSet(uint32_t time) {
+  _power.trustedClockSet(time, getRTCClock()->getCurrentTime(), millis());
+}
+
+void MyMesh::updatePowerState(bool timer_ok, bool cli_pending) {
+  uint32_t now = getRTCClock()->getCurrentTime();
+  bool pending = cli_pending || hasPendingNightWork() || radio_driver.hasPendingRadioWork();
+  auto decision = _power.update(now, millis(), _prefs.night_sleep_enabled == 1,
+    _prefs.night_start, _prefs.night_end, pending, timer_ok);
+  if (decision == RepeaterPowerManager::WAKE) {
+    MESH_DEBUG_PRINTLN("Night wake: %s", _power.wakeReason());
+    if (!radio_driver.wakeNightSleep()) _power.denySleep("radio wake error");
+  } else if (decision == RepeaterPowerManager::SLEEP) {
+    int16_t result = radio_driver.tryNightSleep();
+    if (result == RADIOLIB_ERR_NONE) {
+      _power.confirmSleep(now, millis(), _prefs.night_end);
+      MESH_DEBUG_PRINTLN("Night sleep until %lu UTC", (unsigned long)_power.nextWake());
+    } else if (result < 0) {
+      _power.denySleep("radio sleep error");
+    } else {
+      _power.deferSleep("radio busy");
+    }
+  }
+}
+
+static bool parseUTCTime(const char* text, uint16_t& minute) {
+  if (strlen(text) != 5 || text[2] != ':' || text[0] < '0' || text[0] > '9' ||
+      text[1] < '0' || text[1] > '9' || text[3] < '0' || text[3] > '9' ||
+      text[4] < '0' || text[4] > '9') return false;
+  uint16_t h = (text[0] - '0') * 10 + text[1] - '0';
+  uint16_t m = (text[3] - '0') * 10 + text[4] - '0';
+  if (h > 23 || m > 59) return false;
+  minute = h * 60 + m;
+  return true;
+}
+
+bool MyMesh::handlePowerCommand(const char* command, char* reply) {
+  _power.observeClock(getRTCClock()->getCurrentTime(), millis());
+  if (strcmp(command, "get clock.valid") == 0) {
+    strcpy(reply, _power.clockValid() ? "true" : "false");
+  } else if (strcmp(command, "get rx.preamble") == 0) {
+    sprintf(reply, "%u symbols minimum at sender", _prefs.rx_min_preamble);
+  } else if (strncmp(command, "set rx.preamble ", 16) == 0) {
+    char* end;
+    long symbols = strtol(command + 16, &end, 10);
+    if (*end || symbols < 1 || symbols > 32) {
+      strcpy(reply, "ERR: expected 1..32 preamble symbols");
+      return true;
+    }
+    uint16_t old = _prefs.rx_min_preamble;
+    _prefs.rx_min_preamble = symbols;
+    if (old != symbols && !_cli.savePrefs(_fs)) {
+      _prefs.rx_min_preamble = old;
+      strcpy(reply, "ERR: saving prefs failed");
+    } else {
+      radio_driver.setMinimumSenderPreamble(symbols);
+      strcpy(reply, "OK - must match shortest sender preamble");
+    }
+  } else if (strcmp(command, "get powersave") == 0) {
+    strcpy(reply, _prefs.powersaving_enabled ? "on" : "off");
+  } else if (strcmp(command, "get night.sleep") == 0) {
+    sprintf(reply, "%s, %02u:%02u-%02u:%02u UTC, %s", _prefs.night_sleep_enabled == 1 ? "on" : "off",
+      _prefs.night_start / 60, _prefs.night_start % 60, _prefs.night_end / 60, _prefs.night_end % 60,
+      _power.reason());
+  } else if (strcmp(command, "get night.start") == 0 || strcmp(command, "get night.end") == 0) {
+    uint16_t t = strcmp(command, "get night.start") == 0 ? _prefs.night_start : _prefs.night_end;
+    sprintf(reply, "%02u:%02u UTC", t / 60, t % 60);
+  } else if (strcmp(command, "get power.status") == 0) {
+    uint32_t wake = _power.nextWake();
+    if (!wake && _prefs.night_sleep_enabled == 1 && _power.clockValid() &&
+        RepeaterPowerManager::validWindow(_prefs.night_start, _prefs.night_end)) {
+      wake = RepeaterPowerManager::windowEnd(getRTCClock()->getCurrentTime(), _prefs.night_end);
+    }
+    sprintf(reply, "clock=%s rtc=%lu mode=%s wake=%lu err=%d", _power.clockValid() ? "valid" : "invalid",
+      (unsigned long)getRTCClock()->getCurrentTime(), radio_driver.getMode(),
+      (unsigned long)wake, radio_driver.getPowerError());
+  } else if (strcmp(command, "get power.reason") == 0) {
+    sprintf(reply, "sleep=%s; wake=%s", _power.reason(), _power.wakeReason());
+  } else if (strcmp(command, "set night.sleep on") == 0 || strcmp(command, "set night.sleep off") == 0) {
+    uint8_t old = _prefs.night_sleep_enabled;
+    uint8_t enabled = strcmp(command, "set night.sleep on") == 0;
+    if (enabled && !RepeaterPowerManager::validWindow(_prefs.night_start, _prefs.night_end)) {
+      strcpy(reply, "ERR: invalid UTC window");
+      return true;
+    }
+    _prefs.night_sleep_enabled = enabled;
+    if (old != enabled && !_cli.savePrefs(_fs)) {
+      _prefs.night_sleep_enabled = old;
+      strcpy(reply, "ERR: saving prefs failed");
+    } else {
+      _power.resetFault();
+      strcpy(reply, "OK - UTC; clock validity required");
+    }
+  } else if (strncmp(command, "set night.start ", 16) == 0 || strncmp(command, "set night.end ", 14) == 0) {
+    bool start = strncmp(command, "set night.start ", 16) == 0;
+    uint16_t minute;
+    if (!parseUTCTime(command + (start ? 16 : 14), minute)) {
+      strcpy(reply, "ERR: expected HH:MM UTC");
+      return true;
+    }
+    uint16_t& setting = start ? _prefs.night_start : _prefs.night_end;
+    uint16_t old = setting;
+    setting = minute;
+    if (_prefs.night_sleep_enabled && !RepeaterPowerManager::validWindow(_prefs.night_start, _prefs.night_end)) {
+      setting = old;
+      strcpy(reply, "ERR: start and end must differ");
+    } else if (old != minute && !_cli.savePrefs(_fs)) {
+      setting = old;
+      strcpy(reply, "ERR: saving prefs failed");
+    } else {
+      _power.resetFault();
+      strcpy(reply, "OK - UTC");
+    }
+  } else {
+    return false;
+  }
+  return true;
+}
+#endif

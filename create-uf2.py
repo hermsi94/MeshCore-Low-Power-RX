@@ -15,11 +15,11 @@ def create_uf2_action(source, target, env):
             '"$PYTHONEXE"',
             '"$PROJECT_DIR/bin/uf2conv/uf2conv.py"',
             '-f', '0xADA52840',
-            '-c', firmware_hex,
-            '-o', uf2_file,
+            '-c', f'"{firmware_hex}"',
+            '-o', f'"{uf2_file}"',
         ]
     )
-    env.Execute(uf2_cmd)
+    return env.Execute(uf2_cmd)
 
 env.AddCustomTarget(
     name="create_uf2",

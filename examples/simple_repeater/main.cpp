@@ -30,6 +30,23 @@ static char ethernet_command[160];
 // For power saving
 unsigned long POWERSAVING_FIRSTSLEEP_SECS = 120; // The first sleep (if enabled) from boot
 
+#ifdef REPEATER_LOW_POWER
+static TimerHandle_t night_timer = nullptr;
+static volatile uint32_t night_timer_pulse = 0;
+static volatile bool night_timer_seen = false;
+static bool night_timer_started = false;
+
+static void nightTimerCallback(TimerHandle_t) {
+  night_timer_pulse = millis();
+  night_timer_seen = true;
+}
+
+static bool nightTimerHealthy() {
+  return night_timer_started && night_timer_seen && xTimerIsTimerActive(night_timer) &&
+    uint32_t(millis() - night_timer_pulse) < 3000;
+}
+#endif
+
 #if defined(PIN_USER_BTN) && defined(_SEEED_SENSECAP_SOLAR_H_)
 static unsigned long userBtnDownAt = 0;
 #define USER_BTN_HOLD_OFF_MILLIS 1500
@@ -105,6 +122,11 @@ void setup() {
   sensors.begin();
 
   the_mesh.begin(fs);
+
+#ifdef REPEATER_LOW_POWER
+  night_timer = xTimerCreate("night", ms2tick(1000), pdTRUE, nullptr, nightTimerCallback);
+  night_timer_started = night_timer && xTimerStart(night_timer, 0) == pdPASS;
+#endif
 
 #ifdef DISPLAY_CLASS
   ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);
@@ -185,12 +207,33 @@ void loop() {
   }
 #endif
 
+#ifdef REPEATER_LOW_POWER
+  rtc_clock.tick();
+  if (the_mesh.isNightSleeping()) {
+    the_mesh.updatePowerState(nightTimerHealthy(), command[0] != 0 || Serial.available());
+  }
+  if (the_mesh.isNightSleeping()) {
+    // The existing RTC1-backed FreeRTOS idle path uses System-ON, retaining RAM.
+    // Check at most once a second; no multi-hour delay and local CLI stays usable.
+    vTaskDelay(ms2tick(1000));
+    return;
+  }
+#endif
+
   the_mesh.loop();
   sensors.loop();
 #ifdef DISPLAY_CLASS
   ui_task.loop();
 #endif
   rtc_clock.tick();
+
+#ifdef REPEATER_LOW_POWER
+  the_mesh.updatePowerState(nightTimerHealthy(), command[0] != 0 || Serial.available());
+  if (the_mesh.isNightSleeping()) {
+    vTaskDelay(ms2tick(1000));
+    return;
+  }
+#endif
 
 #ifdef HAS_EXTERNAL_WATCHDOG
   external_watchdog.loop();

@@ -5,6 +5,9 @@
 #include <helpers/radiolib/RadioLibWrappers.h>
 #include <XiaoNrf52Board.h>
 #include <helpers/radiolib/CustomSX1262Wrapper.h>
+#ifdef REPEATER_LOW_POWER
+  #include <helpers/radiolib/RepeaterSX1262Wrapper.h>
+#endif
 #include <helpers/AutoDiscoverRTCClock.h>
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/sensors/EnvironmentSensorManager.h>

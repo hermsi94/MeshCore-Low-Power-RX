@@ -111,6 +111,7 @@ void RadioLibWrapper::startRecv() {
   _radio->standby(); // without this LR2021 can throw -706 when calling startReceive after hardware CAD when side detectors are enabled
   #endif
   int err = _radio->startReceive();
+  _last_rx_error = err;
   if (err == RADIOLIB_ERR_NONE) {
     state = STATE_RX;
   } else {
@@ -122,9 +123,21 @@ bool RadioLibWrapper::isInRecvMode() const {
   return (state & ~STATE_INT_READY) == STATE_RX;
 }
 
+bool RadioLibWrapper::hasRadioInterrupt() const {
+  return (state & STATE_INT_READY) != 0;
+}
+
+bool RadioLibWrapper::isTransmitting() const {
+  return (state & ~STATE_INT_READY) == STATE_TX_WAIT;
+}
+
+void RadioLibWrapper::markRadioIdle() { state = STATE_IDLE; }
+
 int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
   int len = 0;
   if (state & STATE_INT_READY) {
+    state &= ~STATE_INT_READY;
+    if (!isReceivePacketReady()) return 0;
     len = _radio->getPacketLength();
     if (len > 0) {
       if (len > sz) { len = sz; }
@@ -136,6 +149,7 @@ int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
       } else {
       //  Serial.print("  readData() -> "); Serial.println(len);
         n_recv++;
+        onReceiveComplete();
       }
     }
     #if defined(USE_LR2021)
@@ -146,12 +160,7 @@ int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
   }
 
   if (state != STATE_RX) {
-    int err = _radio->startReceive();
-    if (err == RADIOLIB_ERR_NONE) {
-      state = STATE_RX;
-    } else {
-      MESH_DEBUG_PRINTLN("RadioLibWrapper: error: startReceive(%d)", err);
-    }
+    startRecv();
   }
   return len;
 }

@@ -82,7 +82,12 @@ struct NeighbourInfo {
 
 #define PACKET_LOG_FILE  "/packet_log"
 
+#ifdef REPEATER_LOW_POWER
+  #include "RepeaterPowerManager.h"
+#endif
+
 class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
+  static constexpr int PACKET_POOL_SIZE = 32;
   FILESYSTEM* _fs;
   uint32_t last_millis;
   uint64_t uptime_millis;
@@ -91,6 +96,11 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   NodePrefs _prefs;
   ClientACL  acl;
   CommonCLI _cli;
+#ifdef REPEATER_LOW_POWER
+  RepeaterPowerManager _power;
+  bool handlePowerCommand(const char* command, char* reply);
+  bool hasPendingNightWork() const;
+#endif
   uint8_t reply_data[MAX_PACKET_PAYLOAD];
   uint8_t reply_path[MAX_PATH_SIZE];
   uint8_t reply_path_len;
@@ -252,6 +262,11 @@ public:
 
   // To check if there is pending work
   bool hasPendingWork() const;
+#ifdef REPEATER_LOW_POWER
+  void onTrustedClockSet(uint32_t time) override;
+  void updatePowerState(bool timer_ok, bool cli_pending);
+  bool isNightSleeping() const { return _power.sleeping(); }
+#endif
 
   bool setRxBoostedGain(bool enable) override;
 

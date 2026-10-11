@@ -56,6 +56,12 @@ public:
   char bridge_secret[16]; // for XOR encryption of bridge packets (ESP-NOW only)
   // Power setting
   uint8_t powersaving_enabled = 0; // boolean
+#ifdef REPEATER_LOW_POWER
+  uint8_t rx_duty_enabled = 0;
+  uint16_t rx_min_preamble = 16;
+  uint8_t night_sleep_enabled = 0;
+  uint16_t night_start = 60, night_end = 300; // minutes since midnight UTC
+#endif
   // Gps settings
   uint8_t gps_enabled = 0;
   uint32_t gps_interval = 0; // in seconds
@@ -134,6 +140,13 @@ private:
     void structure() override {
       def("adc_mult", _parent->adc_multiplier);
       def("pwr_sav_en", _parent->powersaving_enabled);
+#ifdef REPEATER_LOW_POWER
+      def("rx_duty", _parent->rx_duty_enabled);
+      def("rx_pre", _parent->rx_min_preamble);
+      def("night_en", _parent->night_sleep_enabled);
+      def("night_start", _parent->night_start);
+      def("night_end", _parent->night_end);
+#endif
     }
   public:
     PowerPrefs(NodePrefs* parent) : _parent(parent) { }
@@ -196,6 +209,7 @@ public:
 
 class CommonCLICallbacks {
 public:
+  virtual void onTrustedClockSet(uint32_t time) { }
   virtual void savePrefs() = 0;
   virtual const char* getFirmwareVer() = 0;
   virtual const char* getBuildDate() = 0;
