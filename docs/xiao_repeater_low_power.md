@@ -6,12 +6,16 @@ The firmware has been built and passed software tests. The maintainer has also f
 
 ## Reported hardware measurements
 
-The maintainer reported these approximate measurements on their XIAO nRF52840 / Wio SX1262 setup. During testing, the repeater was powered by a battery connected to the XIAO nRF52840 battery terminals, rather than by USB:
+The tested hardware is the [Seeed Studio XIAO nRF52840 & Wio-SX1262 Kit](https://wiki.seeedstudio.com/xiao_nrf52840%26_wio_SX1262_kit_for_meshtastic/), combining the XIAO nRF52840 board and the Wio-SX1262 radio add-on. The maintainer reported the approximate measurements below with a battery connected to the XIAO nRF52840 battery terminals, using battery power rather than USB power:
 
 | Operating mode | Reported current |
 | --- | ---: |
 | RX duty cycling | 2.6 mA |
 | Scheduled night sleep: SX1262 and nRF52840 sleeping | 0.5 mA (500 uA) |
+
+These values describe the assembled kit running this firmware, including its board circuitry, rather than the isolated sleep current of the nRF52840 or SX1262 chips.
+
+The published [XIAO nRF52840 v1.1 schematic](https://files.seeedstudio.com/wiki/XIAO-BLE/Seeed-Studio-XIAO-nRF52840-Sense-v1.1.pdf) shows battery and USB power feeding the same 3.3 V regulator through the source-selection circuit. Battery operation therefore still uses the regulator, whose quiescent current can contribute to the total. The measured 500 uA has not been broken down by component and must not be attributed entirely to the regulator. This firmware also retains the running system and wakes periodically during night sleep.
 
 These are measurements from one setup, not guaranteed specifications for every board. Supply voltage, USB connection, sensors, regulator losses, modem settings, RF traffic, and measurement method can affect the result. The successful flashing and operation report does not establish that every recovery and reliability test below has been completed.
 

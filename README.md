@@ -1,8 +1,8 @@
 ## XIAO low-power repeater fork
 
-This fork adds RX duty cycling and scheduled UTC night sleep to the official MeshCore `repeater-v1.17.1` firmware for the XIAO nRF52840 / Wio SX1262. Build the `Xiao_nrf52_repeater` environment to use these features. Both options are disabled by default.
+This fork adds RX duty cycling and scheduled UTC night sleep to the official MeshCore `repeater-v1.17.1` firmware for the [Seeed Studio XIAO nRF52840 & Wio-SX1262 Kit](https://wiki.seeedstudio.com/xiao_nrf52840%26_wio_SX1262_kit_for_meshtastic/). Build the `Xiao_nrf52_repeater` environment to use these features. Both options are disabled by default.
 
-The maintainer has flashed the firmware and reported successful operation, with approximately **2.6 mA during RX duty cycling** and **0.5 mA (500 uA) during night sleep** on their setup. These measurements were taken with the repeater powered by a battery connected to the XIAO nRF52840 battery terminals, rather than by USB. Current consumption depends on the hardware and operating conditions.
+The maintainer has flashed the firmware on this kit and reported successful operation, with approximately **2.6 mA during RX duty cycling** and **0.5 mA (500 uA) during night sleep** on their setup. These measurements were taken with the repeater powered by a battery connected to the XIAO nRF52840 battery terminals, rather than by USB. The values describe the assembled kit, including its board circuitry; they are not isolated chip sleep-current measurements. Current consumption depends on the hardware and operating conditions.
 
 See the [low-power repeater guide](./docs/xiao_repeater_low_power.md) for configuration commands, transmitter preamble requirements, clock synchronization, build instructions, limitations, and validation status. This is a personal experimental fork with changes developed with LLM assistance.
 
